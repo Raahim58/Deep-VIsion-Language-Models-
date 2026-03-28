@@ -132,6 +132,14 @@ def load_reference_model(config: dict[str, Any], checkpoint: str | None = None):
     return model
 
 
+def _scalar_token_id(token_id):
+    if isinstance(token_id, (list, tuple)):
+        if not token_id:
+            return None
+        return int(token_id[0])
+    return None if token_id is None else int(token_id)
+
+
 def load_reward_model(config: dict[str, Any], checkpoint: str | None = None, trainable: bool = False):
     model_name = config["models"]["reward_name"]
     source = checkpoint or config["models"].get("rm_checkpoint") or model_name
@@ -149,7 +157,14 @@ def load_reward_model(config: dict[str, Any], checkpoint: str | None = None, tra
         )
     except Exception as exc:
         raise _load_error_message(base_name, exc)
-    model.config.pad_token_id = model.config.eos_token_id
+
+    pad_id = _scalar_token_id(model.config.pad_token_id)
+    if pad_id is None:
+        pad_id = _scalar_token_id(model.config.eos_token_id)
+    if pad_id is None:
+        raise ValueError(f"Could not resolve a scalar pad_token_id for reward model {base_name}")
+    model.config.pad_token_id = pad_id
+
     if adapter_path:
         model = PeftModel.from_pretrained(model, adapter_path, is_trainable=trainable)
     elif trainable and config["rm"].get("use_lora", True):
