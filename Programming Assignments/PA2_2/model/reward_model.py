@@ -7,6 +7,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig
+from model.loading import _resolve_device_map
 
 
 class RewardModel(nn.Module):
@@ -17,20 +18,23 @@ class RewardModel(nn.Module):
 
     def __init__(self, backbone_name: str, use_8bit: bool = False, dtype: torch.dtype = torch.bfloat16):
         super().__init__()
+        device_map = _resolve_device_map()
         if use_8bit:
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True)
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 backbone_name,
                 num_labels=1,
                 quantization_config=bnb_cfg,
-                device_map="auto",
+                # device_map="auto",
+                device_map=device_map,
             )
         else:
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 backbone_name,
                 num_labels=1,
                 torch_dtype=dtype,
-                device_map="auto",
+                # device_map="auto",
+                device_map=device_map,
             )
         if self.model.config.pad_token_id is None:
             self.model.config.pad_token_id = self.model.config.eos_token_id

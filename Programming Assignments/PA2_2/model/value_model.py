@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from transformers import AutoModel, BitsAndBytesConfig
+from model.loading import _resolve_device_map
 
 
 class ValueModel(nn.Module):
@@ -22,15 +23,15 @@ class ValueModel(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
-
+        device_map = _resolve_device_map()
         if use_8bit:
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True)
             self.backbone = AutoModel.from_pretrained(
-                backbone_name, quantization_config=bnb_cfg, device_map="auto",
+                backbone_name, quantization_config=bnb_cfg, device_map=device_map, # auto prev.
             )
         else:
             self.backbone = AutoModel.from_pretrained(
-                backbone_name, torch_dtype=dtype, device_map="auto",
+                backbone_name, torch_dtype=dtype, device_map=device_map, # auto prev.
             )
 
         hidden_size = self.backbone.config.hidden_size

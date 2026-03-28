@@ -6,6 +6,10 @@ from __future__ import annotations
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
+def _resolve_device_map():
+    if torch.cuda.is_available():
+        return "cuda"   # explicit, not "auto"
+    return "cpu"
 
 def get_dtype(dtype_str: str) -> torch.dtype:
     mapping = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
