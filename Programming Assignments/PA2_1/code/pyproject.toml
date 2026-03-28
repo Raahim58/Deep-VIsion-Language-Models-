@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai623-alignment-pa2"
+version = "0.1.0"
+description = "Compact Colab-first RLHF/alignment assignment codebase"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2.0",
+  "transformers>=4.46.0",
+  "datasets>=2.20.0",
+  "peft>=0.12.0",
+  "accelerate>=0.33.0",
+  "bitsandbytes>=0.43.1",
+  "PyYAML>=6.0.1",
+  "tqdm>=4.66.4",
+  "pandas>=2.2.2",
+  "matplotlib>=3.9.0",
+  "numpy>=1.26.4",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alignment*", "data*", "model*", "utils*"]

@@ -1,0 +1,30 @@
+# ── Default / shared config ────────────────────────────────────────────────
+policy_model: "HuggingFaceTB/SmolLM2-360M-Instruct"
+reward_model: "meta-llama/Llama-3.2-1B-Instruct"
+value_model:  "meta-llama/Llama-3.2-1B-Instruct"
+
+# tokenizer
+pad_side: "left"
+
+# sequence
+max_seq_len: 1024
+max_new_tokens: 128
+
+# lora
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules: ["q_proj", "v_proj"]
+
+# training
+seed: 42
+dtype: "bfloat16"          # "bfloat16" | "float16" | "float32"
+use_8bit_frozen: true      # quantize frozen πref / RM to 8-bit
+gradient_checkpointing: true
+
+# evaluation
+eval_prompts: 200
+eval_every: 25
+
+# output
+run_dir: "runs"

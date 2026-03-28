@@ -1,0 +1,16 @@
+# ── DPO ────────────────────────────────────────────────────────────────────
+method: "dpo"
+dataset: "Anthropic/hh-rlhf"
+dataset_split: "harmless-base"
+
+epochs: 1
+batch_size: 8
+grad_accum: 4
+lr: 5.0e-5
+warmup_steps: 30
+beta: 0.1
+max_seq_len: 1024
+
+log_every: 10
+eval_every: 25
+save_checkpoint: true

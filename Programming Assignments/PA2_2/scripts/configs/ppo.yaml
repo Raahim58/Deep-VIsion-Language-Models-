@@ -1,0 +1,25 @@
+# ── PPO ────────────────────────────────────────────────────────────────────
+method: "ppo"
+dataset: "Anthropic/hh-rlhf"
+dataset_split: "harmless-base"
+
+update_steps: 200
+prompts_per_step: 8
+max_new_tokens: 128
+ppo_epochs: 4            # mini-batch epochs per rollout batch
+
+lr_policy: 1.0e-5
+lr_value: 1.0e-4
+beta: 0.1                # KL coefficient
+epsilon: 0.2             # clipping ε
+gamma: 1.0
+lam: 0.95                # GAE λ
+c_value: 0.5             # critic loss weight
+c_entropy: 0.01          # entropy bonus weight
+
+temperature: 0.7
+top_p: 0.9
+
+log_every: 5
+eval_every: 25
+save_checkpoint: true

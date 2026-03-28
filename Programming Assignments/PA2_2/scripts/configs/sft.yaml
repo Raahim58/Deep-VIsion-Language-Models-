@@ -1,0 +1,15 @@
+# ── SFT warm-up ────────────────────────────────────────────────────────────
+method: "sft"
+dataset: "Anthropic/hh-rlhf"
+dataset_split: "harmless-base"
+
+epochs: 1
+batch_size: 8
+grad_accum: 4
+lr: 2.0e-4
+warmup_steps: 50
+max_seq_len: 1024
+
+log_every: 10
+eval_every: 100
+save_checkpoint: true

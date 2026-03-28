@@ -1,0 +1,15 @@
+# ── Reward model fine-tuning ───────────────────────────────────────────────
+method: "rm"
+dataset: "Anthropic/hh-rlhf"
+dataset_split: "harmless-base"
+
+epochs: 1
+batch_size: 8
+lr: 1.0e-4
+warmup_steps: 30
+max_seq_len: 1024
+lambda_reg: 1.0e-3      # L2 regularisation on reward magnitudes
+
+log_every: 10
+save_checkpoint: true
+target_accuracy: 0.60    # bail-out threshold check

@@ -1,0 +1,21 @@
+# ── RLVR (GSM8K) ───────────────────────────────────────────────────────────
+method: "rlvr"
+dataset: "openai/gsm8k"
+dataset_config: "main"
+
+update_steps: 300
+prompts_per_step: 8
+K: 4                     # rollouts per prompt
+max_new_tokens: 256
+max_prompt_tokens: 200
+
+lr: 1.0e-5
+beta: 0.05               # KL coefficient (lighter for math task)
+epsilon: 0.2
+
+temperature: 0.7
+top_p: 0.9
+
+log_every: 5
+eval_every: 25
+save_checkpoint: true
