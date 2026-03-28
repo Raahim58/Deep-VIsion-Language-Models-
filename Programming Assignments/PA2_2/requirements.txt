@@ -1,0 +1,12 @@
+torch>=2.2.0
+transformers>=4.46.0
+datasets>=2.20.0
+peft>=0.12.0
+accelerate>=0.33.0
+bitsandbytes>=0.43.1
+PyYAML>=6.0.1
+tqdm>=4.66.4
+pandas>=2.2.2
+matplotlib>=3.9.0
+numpy>=1.26.4
+sentencepiece>=0.2.0
