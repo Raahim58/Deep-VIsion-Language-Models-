@@ -15,9 +15,19 @@ from model.loading import load_reward_model, load_reward_tokenizer
 from model.reward_model import pairwise_reward_loss, score_sequences
 from utils.config import load_config
 from utils.io import make_run_dir, save_json
-from utils.logging_utils import JsonlMetricLogger, get_logger
+from utils.logging_utils import JsonlMetricLogger, emit_step_log, get_logger
 from utils.memory import amp_context, get_torch_dtype
 from utils.seed import seed_everything
+
+
+def _grad_norm(parameters) -> float:
+    total = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad = param.grad.detach().float()
+        total += grad.norm(2).item() ** 2
+    return total ** 0.5
 
 
 def train_reward_model(config: dict) -> dict:
@@ -28,6 +38,7 @@ def train_reward_model(config: dict) -> dict:
 
     tokenizer = load_reward_tokenizer(config["models"]["reward_name"])
     model = load_reward_model(config, trainable=True)
+    model.config.pad_token_id = int(tokenizer.pad_token_id)
     train_dataset = make_dpo_dataset(
         load_hh_dataset(config, config["data"]["hh_train_split"], config["data"]["hh_train_samples"])
     )
@@ -52,8 +63,11 @@ def train_reward_model(config: dict) -> dict:
     scheduler = get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     dtype = get_torch_dtype(config["prefer_bf16"])
     scaler = GradScaler(enabled=torch.cuda.is_available() and dtype == torch.float16)
+    log_every = max(1, int(config["rm"].get("log_every", 1)))
 
     global_step = 0
+    latest_loss = None
+    latest_acc = None
     model.train()
     for epoch in range(config["rm"]["epochs"]):
         progress = tqdm(loader, desc=f"RM epoch {epoch + 1}/{config['rm']['epochs']}")
@@ -64,9 +78,15 @@ def train_reward_model(config: dict) -> dict:
                 chosen_scores = score_sequences(model, batch["chosen_input_ids"], batch["chosen_attention_mask"])
                 rejected_scores = score_sequences(model, batch["rejected_input_ids"], batch["rejected_attention_mask"])
                 loss = pairwise_reward_loss(chosen_scores, rejected_scores) / config["rm"]["grad_accum"]
+            latest_loss = float(loss.item() * config["rm"]["grad_accum"])
+            latest_acc = float((chosen_scores > rejected_scores).float().mean().item())
             scaler.scale(loss).backward()
 
             if step % config["rm"]["grad_accum"] == 0:
+                if scaler.is_enabled():
+                    scaler.unscale_(optimizer)
+                grad_norm = _grad_norm(model.parameters())
+                lr = optimizer.param_groups[0]["lr"]
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -74,17 +94,35 @@ def train_reward_model(config: dict) -> dict:
                 global_step += 1
                 metrics = {
                     "step": global_step,
-                    "loss": float(loss.item() * config["rm"]["grad_accum"]),
-                    "pairwise_acc": float((chosen_scores > rejected_scores).float().mean().item()),
+                    "loss": latest_loss,
+                    "pairwise_acc": latest_acc,
+                    "grad_norm": grad_norm,
+                    "lr": lr,
                 }
                 metric_logger.log(metrics)
-                progress.set_postfix(loss=metrics["loss"], acc=metrics["pairwise_acc"])
-        if len(loader) % config["rm"]["grad_accum"] != 0:
+                if global_step % log_every == 0:
+                    emit_step_log(logger, f"[RM {global_step}] loss={latest_loss:.4f} pref_acc={latest_acc:.4f} grad_norm={grad_norm:.4f} lr={lr:.6g}")
+                progress.set_postfix(loss=latest_loss, acc=latest_acc, grad=grad_norm)
+        if len(loader) % config["rm"]["grad_accum"] != 0 and latest_loss is not None and latest_acc is not None:
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            grad_norm = _grad_norm(model.parameters())
+            lr = optimizer.param_groups[0]["lr"]
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
             global_step += 1
+            metrics = {
+                "step": global_step,
+                "loss": latest_loss,
+                "pairwise_acc": latest_acc,
+                "grad_norm": grad_norm,
+                "lr": lr,
+            }
+            metric_logger.log(metrics)
+            if global_step % log_every == 0:
+                emit_step_log(logger, f"[RM {global_step}] loss={latest_loss:.4f} pref_acc={latest_acc:.4f} grad_norm={grad_norm:.4f} lr={lr:.6g}")
 
     model.save_pretrained(run_dir)
     tokenizer.save_pretrained(run_dir)

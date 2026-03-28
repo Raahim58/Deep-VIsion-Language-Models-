@@ -25,3 +25,10 @@ class JsonlMetricLogger:
     def log(self, metrics: dict) -> None:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(metrics, ensure_ascii=False) + "\n")
+
+
+def emit_step_log(logger: logging.Logger, message: str) -> None:
+    if logger.handlers:
+        logger.info(message)
+    else:
+        print(message, flush=True)

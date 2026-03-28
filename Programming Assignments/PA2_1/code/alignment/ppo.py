@@ -18,6 +18,16 @@ def _left_pad(seqs: list[list[int]], pad_value: int) -> torch.Tensor:
     return torch.tensor([[pad_value] * (max_len - len(seq)) + seq for seq in seqs], dtype=torch.long)
 
 
+def _grad_norm(parameters) -> float:
+    total = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad = param.grad.detach().float()
+        total += grad.norm(2).item() ** 2
+    return total ** 0.5
+
+
 def build_rollout_batch(tokenizer, prompts: list[str], completions: list[str], max_length: int) -> dict[str, torch.Tensor]:
     input_ids = []
     attention_masks = []
@@ -129,7 +139,8 @@ def ppo_update_step(
     entropy_coef: float = 0.0,
 ) -> dict[str, float]:
     was_training = policy.training
-    policy.eval()
+    policy.train()
+    value_model.train()
     input_ids = rollout["input_ids"]
     attention_mask = rollout["attention_mask"]
     response_mask = rollout["response_mask"]
@@ -157,6 +168,7 @@ def ppo_update_step(
     policy_optimizer.zero_grad(set_to_none=True)
     total_policy_loss = policy_loss - entropy_coef * entropy
     total_policy_loss.backward()
+    policy_grad_norm = _grad_norm(policy.parameters())
     policy_optimizer.step()
     if was_training:
         policy.train()
@@ -165,6 +177,7 @@ def ppo_update_step(
     value_loss = ((values - returns) ** 2 * valid_mask).sum() / valid_mask.sum().clamp_min(1.0)
     value_optimizer.zero_grad(set_to_none=True)
     (value_coef * value_loss).backward()
+    value_grad_norm = _grad_norm(value_model.parameters())
     value_optimizer.step()
 
     approx_kl = mean_masked_kl(token_logprobs.detach(), ref_logprobs, valid_mask).item()
@@ -176,4 +189,6 @@ def ppo_update_step(
         "mean_kl": float(approx_kl),
         "ratio_mean": float(ratio_mean),
         "mean_reward": float(rollout["sequence_rewards"].mean().item()),
+        "policy_grad_norm": float(policy_grad_norm),
+        "value_grad_norm": float(value_grad_norm),
     }

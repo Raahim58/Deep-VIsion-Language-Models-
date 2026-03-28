@@ -16,6 +16,16 @@ def _left_pad(seqs: list[list[int]], pad_value: int) -> torch.Tensor:
     return torch.tensor([[pad_value] * (max_len - len(seq)) + seq for seq in seqs], dtype=torch.long)
 
 
+def _grad_norm(parameters) -> float:
+    total = 0.0
+    for param in parameters:
+        if param.grad is None:
+            continue
+        grad = param.grad.detach().float()
+        total += grad.norm(2).item() ** 2
+    return total ** 0.5
+
+
 def _build_batch(tokenizer, prompts: list[str], completions: list[str], max_length: int) -> dict[str, torch.Tensor]:
     input_ids = []
     attention_masks = []
@@ -81,11 +91,21 @@ def collect_group_rollout(
     )
 
     rewards = reward_fn(expanded_prompts, completions).to(device)
+    if rewards.numel() != len(expanded_prompts):
+        raise ValueError(
+            f"GRPO reward function returned {rewards.numel()} rewards for {len(expanded_prompts)} completions."
+        )
     rewards_grouped = rewards.view(len(prompts), config["grpo"]["k_rollouts"])
     group_mean = rewards_grouped.mean(dim=1, keepdim=True)
     group_std = rewards_grouped.std(dim=1, unbiased=False, keepdim=True)
-    seq_advantages = ((rewards_grouped - group_mean) / group_std.clamp_min(1.0e-4)).view(-1)
+    seq_advantages = (rewards_grouped - group_mean).view(-1)
     token_advantages = valid_mask * seq_advantages.unsqueeze(1)
+    valid_advantages = token_advantages[valid_mask > 0]
+    if valid_advantages.numel() > 0:
+        adv_mean = valid_advantages.mean()
+        adv_std = valid_advantages.std(unbiased=False).clamp_min(1.0e-8)
+        token_advantages = ((token_advantages - adv_mean) / adv_std) * valid_mask
+    degenerate_frac = float((group_std.squeeze(1) < 1.0e-4).float().mean().item())
 
     if was_training:
         policy.train()
@@ -98,6 +118,7 @@ def collect_group_rollout(
         "sequence_rewards": rewards.detach(),
         "expanded_prompts": expanded_prompts,
         "completions": completions,
+        "degenerate_frac": degenerate_frac,
     }
 
 
@@ -109,7 +130,7 @@ def grpo_update_step(
     beta: float,
 ) -> dict[str, float]:
     was_training = policy.training
-    policy.eval()
+    policy.train()
     input_ids = rollout["input_ids"]
     attention_mask = rollout["attention_mask"]
     response_mask = rollout["response_mask"]
@@ -129,6 +150,7 @@ def grpo_update_step(
     policy_optimizer.zero_grad(set_to_none=True)
     total_loss = policy_loss + beta * kl_loss
     total_loss.backward()
+    grad_norm = _grad_norm(policy.parameters())
     policy_optimizer.step()
     if was_training:
         policy.train()
@@ -139,6 +161,8 @@ def grpo_update_step(
         "mean_kl": float(kl_loss.item()),
         "ratio_mean": float(ratio_mean),
         "mean_reward": float(rollout["sequence_rewards"].mean().item()),
+        "policy_grad_norm": float(grad_norm),
+        "degenerate": float(rollout.get("degenerate_frac", 0.0)),
     }
 
 

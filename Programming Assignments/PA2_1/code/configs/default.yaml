@@ -39,8 +39,8 @@ data:
 
 generation:
   do_sample: true
-  temperature: 1.0
-  top_p: 0.95
+  temperature: 0.7
+  top_p: 0.9
   max_new_tokens: 128
 
 optimizer:
@@ -56,6 +56,7 @@ sft:
   grad_accum: 4
   lr: 2.0e-4
   warmup_ratio: 0.03
+  log_every: 1
 
 rm:
   enabled: true
@@ -65,6 +66,7 @@ rm:
   lr: 1.0e-4
   warmup_ratio: 0.03
   use_lora: true
+  log_every: 1
 
 dpo:
   enabled: false
@@ -74,13 +76,14 @@ dpo:
   lr: 5.0e-5
   warmup_ratio: 0.03
   beta: 0.1
+  log_every: 1
 
 ppo:
   enabled: false
   steps: 200
   prompts_per_step: 8
   batch_size: 8
-  update_epochs: 1
+  update_epochs: 4
   lr_policy: 5.0e-5
   lr_value: 1.0e-4
   gamma: 1.0
@@ -91,6 +94,7 @@ ppo:
   value_coef: 0.5
   max_new_tokens: 128
   freeze_value_backbone: true
+  log_every: 1
 
 grpo:
   enabled: false
@@ -103,6 +107,7 @@ grpo:
   beta: 0.1
   epsilon: 0.2
   max_new_tokens: 128
+  log_every: 1
 
 rlvr:
   enabled: false
@@ -115,6 +120,7 @@ rlvr:
   beta: 0.05
   epsilon: 0.2
   max_new_tokens: 256
+  log_every: 1
 
 evaluation:
   prompts: 200

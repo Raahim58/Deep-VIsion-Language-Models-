@@ -86,6 +86,7 @@ def load_policy_model(config: dict[str, Any], checkpoint: str | None = None, tra
             base_name,
             torch_dtype=dtype,
             low_cpu_mem_usage=True,
+            attn_implementation="eager",
         )
     except Exception as exc:
         raise _load_error_message(base_name, exc)
@@ -95,9 +96,9 @@ def load_policy_model(config: dict[str, Any], checkpoint: str | None = None, tra
     elif trainable:
         model = attach_lora(model, build_lora_config(config, TaskType.CAUSAL_LM))
 
+    model.config.use_cache = False
     if trainable:
         model.train()
-        model.config.use_cache = False
         if hasattr(model, "gradient_checkpointing_enable"):
             model.gradient_checkpointing_enable()
     else:
@@ -121,11 +122,13 @@ def load_reference_model(config: dict[str, Any], checkpoint: str | None = None):
             low_cpu_mem_usage=True,
             quantization_config=quantization_config,
             device_map="auto" if quantization_config is not None else None,
+            attn_implementation="eager",
         )
     except Exception as exc:
         raise _load_error_message(base_name, exc)
     if adapter_path:
         model = PeftModel.from_pretrained(model, adapter_path, is_trainable=False)
+    model.config.use_cache = False
     _freeze_model(model)
     if quantization_config is None and get_device().type == "cuda":
         model.to(get_device())
@@ -154,6 +157,7 @@ def load_reward_model(config: dict[str, Any], checkpoint: str | None = None, tra
             low_cpu_mem_usage=True,
             quantization_config=quantization_config,
             device_map="auto" if quantization_config is not None else None,
+            attn_implementation="eager",
         )
     except Exception as exc:
         raise _load_error_message(base_name, exc)
