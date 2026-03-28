@@ -39,6 +39,7 @@ def load_policy(
         model_name,
         torch_dtype=torch_dtype,
         device_map=device_map,
+        attn_implementation="eager",
     )
     model.config.use_cache = False  # Required for gradient checkpointing
     if gradient_checkpointing:

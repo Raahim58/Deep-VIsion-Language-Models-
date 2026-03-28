@@ -24,16 +24,27 @@ class ValueModel(nn.Module):
     ):
         super().__init__()
         device_map = _resolve_device_map()
+        # if use_8bit:
+        #     bnb_cfg = BitsAndBytesConfig(load_in_8bit=True)
+        #     self.backbone = AutoModel.from_pretrained(
+        #         backbone_name, quantization_config=bnb_cfg, device_map=device_map, # auto prev.
+        #     )
+        # else:
+        #     self.backbone = AutoModel.from_pretrained(
+        #         backbone_name, torch_dtype=dtype, device_map=device_map, # auto prev.
+        #     )
         if use_8bit:
             bnb_cfg = BitsAndBytesConfig(load_in_8bit=True)
             self.backbone = AutoModel.from_pretrained(
-                backbone_name, quantization_config=bnb_cfg, device_map=device_map, # auto prev.
+                backbone_name, quantization_config=bnb_cfg, device_map=device_map, attn_implementation="eager", # auto prev.
             )
+            self.backbone.config.use_cache = False
         else:
             self.backbone = AutoModel.from_pretrained(
-                backbone_name, torch_dtype=dtype, device_map=device_map, # auto prev.
+                backbone_name, torch_dtype=dtype, device_map=device_map, attn_implementation="eager", # auto prev.
             )
-
+            self.backbone.config.use_cache = False
+            
         hidden_size = self.backbone.config.hidden_size
         self.value_head = nn.Linear(hidden_size, 1, bias=False)
         nn.init.normal_(self.value_head.weight, std=0.01)
