@@ -59,25 +59,31 @@ def _eval_batch_size(config: dict[str, Any]) -> int:
     return max(1, int(config["evaluation"].get("batch_size", config["dpo"]["batch_size"])))
 
 
-def _batched_outputs(model, tokenizer, prompts: list[str], max_new_tokens: int, batch_size: int) -> list[str]:
+def _batched_outputs(model, tokenizer, prompts: list[str], max_new_tokens: int, batch_size: int, label: str) -> list[str]:
     outputs: list[str] = []
-    for prompt_batch in _batched(prompts, batch_size):
+    total_batches = max(1, (len(prompts) + batch_size - 1) // batch_size)
+    for batch_idx, prompt_batch in enumerate(_batched(prompts, batch_size), start=1):
+        print(f"[Eval:{label}] generation batch {batch_idx}/{total_batches} ({len(prompt_batch)} prompts)", flush=True)
         outputs.extend(generate_completions(model, tokenizer, prompt_batch, max_new_tokens=max_new_tokens, do_sample=False))
     return outputs
 
 
-def _batched_reward_scores(reward_fn, prompts: list[str], outputs: list[str], batch_size: int) -> torch.Tensor:
+def _batched_reward_scores(reward_fn, prompts: list[str], outputs: list[str], batch_size: int, label: str) -> torch.Tensor:
     scores = []
-    for prompt_batch, output_batch in zip(_batched(prompts, batch_size), _batched(outputs, batch_size)):
+    total_batches = max(1, (len(prompts) + batch_size - 1) // batch_size)
+    for batch_idx, (prompt_batch, output_batch) in enumerate(zip(_batched(prompts, batch_size), _batched(outputs, batch_size)), start=1):
+        print(f"[Eval:{label}] reward batch {batch_idx}/{total_batches}", flush=True)
         scores.append(reward_fn(prompt_batch, output_batch).detach().cpu())
     return torch.cat(scores) if scores else torch.empty(0)
 
 
-def _batched_mean_kl(model, reference, tokenizer, prompts: list[str], outputs: list[str], max_seq_len: int, batch_size: int) -> float:
+def _batched_mean_kl(model, reference, tokenizer, prompts: list[str], outputs: list[str], max_seq_len: int, batch_size: int, label: str) -> float:
     device = next(model.parameters()).device
     total_kl = 0.0
     total_count = 0
-    for prompt_batch, output_batch in zip(_batched(prompts, batch_size), _batched(outputs, batch_size)):
+    total_batches = max(1, (len(prompts) + batch_size - 1) // batch_size)
+    for batch_idx, (prompt_batch, output_batch) in enumerate(zip(_batched(prompts, batch_size), _batched(outputs, batch_size)), start=1):
+        print(f"[Eval:{label}] KL batch {batch_idx}/{total_batches}", flush=True)
         rollout = build_rollout_batch(tokenizer, prompt_batch, output_batch, max_seq_len)
         rollout = {key: value.to(device) for key, value in rollout.items()}
         with torch.no_grad():
@@ -90,6 +96,7 @@ def _batched_mean_kl(model, reference, tokenizer, prompts: list[str], outputs: l
 
 
 def evaluate_pairwise_preference_accuracy(config: dict[str, Any], policy_checkpoint: str) -> dict[str, float]:
+    print(f"[Eval] held-out preference accuracy for {policy_checkpoint}", flush=True)
     policy_tokenizer = load_policy_tokenizer(config["models"]["policy_name"])
     policy = load_policy_model(config, checkpoint=policy_checkpoint, trainable=False)
     reference_checkpoint = config["models"].get("sft_checkpoint") or config["models"].get("policy_checkpoint") or policy_checkpoint
@@ -103,7 +110,9 @@ def evaluate_pairwise_preference_accuracy(config: dict[str, Any], policy_checkpo
         num_workers=config["num_workers"],
     )
     values = []
-    for batch in loader:
+    total_batches = max(1, len(loader))
+    for batch_idx, batch in enumerate(loader, start=1):
+        print(f"[Eval:pref_acc] batch {batch_idx}/{total_batches}", flush=True)
         with torch.no_grad():
             metrics = dpo_batch_metrics(policy, reference, batch, config["dpo"]["beta"])
         values.append(float(metrics["preference_accuracy"].item()))
@@ -113,6 +122,8 @@ def evaluate_pairwise_preference_accuracy(config: dict[str, Any], policy_checkpo
 
 
 def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, reference_checkpoint: str) -> dict:
+    print(f"[Eval] candidate={candidate_checkpoint}", flush=True)
+    print(f"[Eval] reference={reference_checkpoint}", flush=True)
     prompts_dataset = make_prompt_dataset(
         load_hh_dataset(config, config["data"]["hh_eval_split"], config["evaluation"]["prompts"])
     )
@@ -122,13 +133,14 @@ def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, ref
     candidate = load_policy_model(config, checkpoint=candidate_checkpoint, trainable=False)
     eval_batch_size = _eval_batch_size(config)
 
-    candidate_outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
-    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
+    print(f"[Eval] prompts={len(prompts)} batch_size={eval_batch_size}", flush=True)
+    candidate_outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size, label="candidate")
+    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size, label="reference")
 
-    candidate_rewards = _batched_reward_scores(reward_fn, prompts, candidate_outputs, eval_batch_size)
-    reference_rewards = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size)
+    candidate_rewards = _batched_reward_scores(reward_fn, prompts, candidate_outputs, eval_batch_size, label="candidate")
+    reference_rewards = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size, label="reference")
     win_rate = float((candidate_rewards > reference_rewards).float().mean().item())
-    mean_kl = _batched_mean_kl(candidate, reference, policy_tokenizer, prompts, candidate_outputs, config["max_seq_len"], eval_batch_size)
+    mean_kl = _batched_mean_kl(candidate, reference, policy_tokenizer, prompts, candidate_outputs, config["max_seq_len"], eval_batch_size, label="candidate")
 
     sample_rows = []
     for prompt, cand, ref, cand_score, ref_score in zip(
@@ -161,13 +173,14 @@ def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, ref
 
 
 def evaluate_gsm8k_pass_at_1(config: dict, candidate_checkpoint: str) -> dict:
+    print(f"[Eval:GSM8K] candidate={candidate_checkpoint}", flush=True)
     dataset = load_gsm8k_dataset(config, "test", config["data"]["gsm_eval_samples"])
     prompts = [row["prompt"] for row in dataset]
     gold = [row["answer"] for row in dataset]
 
     policy_tokenizer = load_policy_tokenizer(config["models"]["policy_name"])
     candidate = load_policy_model(config, checkpoint=candidate_checkpoint, trainable=False)
-    outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["rlvr"]["max_new_tokens"], _eval_batch_size(config))
+    outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["rlvr"]["max_new_tokens"], _eval_batch_size(config), label="gsm8k")
     pass_at_1 = sum(gsm8k_exact_match(pred, target) for pred, target in zip(outputs, gold)) / max(1, len(gold))
     release_cuda_memory(candidate)
     return {"gsm8k_pass_at_1": float(pass_at_1)}
@@ -191,8 +204,10 @@ def evaluate_method_comparison(
     resource_rows = []
 
     eval_batch_size = _eval_batch_size(config)
-    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
-    reference_scores = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size)
+    print(f"[Eval:comparison] methods={list(method_checkpoints.keys())}", flush=True)
+    print(f"[Eval:comparison] prompts={len(prompts)} batch_size={eval_batch_size}", flush=True)
+    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size, label="comparison_sft")
+    reference_scores = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size, label="comparison_sft")
     outputs_by_method['sft'] = reference_outputs
     scores_by_method['sft'] = reference_scores.tolist()
     resource_rows.append(
@@ -208,11 +223,12 @@ def evaluate_method_comparison(
     )
 
     for name, checkpoint in method_checkpoints.items():
+        print(f"[Eval:comparison] method={name} checkpoint={checkpoint}", flush=True)
         model = load_policy_model(config, checkpoint=checkpoint, trainable=False)
         eval_batch_size = _eval_batch_size(config)
-        outputs = _batched_outputs(model, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
-        scores = _batched_reward_scores(reward_fn, prompts, outputs, eval_batch_size)
-        mean_kl = _batched_mean_kl(model, reference, policy_tokenizer, prompts, outputs, config["max_seq_len"], eval_batch_size)
+        outputs = _batched_outputs(model, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size, label=f"comparison_{name}")
+        scores = _batched_reward_scores(reward_fn, prompts, outputs, eval_batch_size, label=f"comparison_{name}")
+        mean_kl = _batched_mean_kl(model, reference, policy_tokenizer, prompts, outputs, config["max_seq_len"], eval_batch_size, label=f"comparison_{name}")
         outputs_by_method[name] = outputs
         scores_by_method[name] = scores.tolist()
         row = {
@@ -273,25 +289,30 @@ def main() -> None:
     config = load_config(args.config)
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.reference_checkpoint) / "eval"
     ensure_dir(out_dir)
+    print(f"[Eval CLI] out_dir={out_dir}", flush=True)
 
     if args.candidate:
         candidates = dict(item.split("=", 1) for item in args.candidate)
+        print(f"[Eval CLI] comparison candidates={list(candidates.keys())}", flush=True)
         result = evaluate_method_comparison(config, candidates, args.reference_checkpoint, include_gsm8k=args.include_gsm8k)
         save_json(out_dir / "comparison_metrics.json", {"metrics": result["metrics"], "resource_rows": result["resource_rows"]})
         pd.DataFrame(result["metrics"]).to_csv(out_dir / "comparison_metrics.csv", index=False)
         pd.DataFrame(result["resource_rows"]).to_csv(out_dir / "resource_table.csv", index=False)
         pd.DataFrame(result["sample_rows"]).to_csv(out_dir / "comparison_samples.csv", index=False)
+        print("[Eval CLI] comparison complete", flush=True)
         return
 
     if not args.policy_checkpoint:
         raise ValueError("Provide --policy-checkpoint for single-model evaluation or --candidate for comparison mode.")
 
+    print(f"[Eval CLI] single policy={args.policy_checkpoint}", flush=True)
     result = evaluate_candidate_vs_reference(config, args.policy_checkpoint, args.reference_checkpoint)
     if args.include_gsm8k:
         result.update(evaluate_gsm8k_pass_at_1(config, args.policy_checkpoint))
 
     save_json(out_dir / "eval_results.json", {k: v for k, v in result.items() if k != "sample_rows"})
     pd.DataFrame(result["sample_rows"]).to_csv(out_dir / "sample_generations.csv", index=False)
+    print("[Eval CLI] single-model evaluation complete", flush=True)
 
 
 if __name__ == "__main__":

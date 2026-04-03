@@ -12,6 +12,7 @@ from eval import evaluate_candidate_vs_reference
 from train_rl import run_dpo, run_grpo, run_ppo
 from utils.config import deep_merge_dicts, load_config
 from utils.io import ensure_dir, make_run_dir, save_json
+from utils.plotting import plot_metric_curves
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -38,6 +39,19 @@ def _run_variant(config: dict, ablation: str) -> dict:
         return run_dpo(config)
     raise ValueError(f"Unsupported ablation: {ablation}")
 
+
+
+
+def _save_variant_artifacts(run_result: dict, metrics: dict) -> None:
+    run_dir = Path(run_result["run_dir"])
+    eval_dir = ensure_dir(run_dir / "eval")
+    scalar_metrics = {k: v for k, v in metrics.items() if k != "sample_rows"}
+    save_json(eval_dir / "eval_results.json", scalar_metrics)
+    if "sample_rows" in metrics:
+        pd.DataFrame(metrics["sample_rows"]).to_csv(eval_dir / "sample_generations.csv", index=False)
+    metrics_path = run_dir / "metrics.jsonl"
+    if metrics_path.exists():
+        plot_metric_curves(metrics_path, run_dir / "metrics.png")
 
 def _find_default_yaml() -> Path | None:
     """Walk up from cwd to find configs/default.yaml."""
@@ -112,6 +126,7 @@ def main() -> None:
             config[method]["beta"] = beta
             result  = _run_variant(config, args.ablation)
             metrics = evaluate_candidate_vs_reference(config, result["policy_checkpoint"], reference_checkpoint)
+            _save_variant_artifacts(result, metrics)
             results.append({
                 "method":              method,
                 "beta":                beta,
@@ -128,6 +143,7 @@ def main() -> None:
             config[method]["epsilon"] = eps
             result  = _run_variant(config, args.ablation)
             metrics = evaluate_candidate_vs_reference(config, result["policy_checkpoint"], reference_checkpoint)
+            _save_variant_artifacts(result, metrics)
             frame   = _load_metrics_frame(result["run_dir"])
             results.append({
                 "method":         method,
@@ -149,6 +165,7 @@ def main() -> None:
             config["grpo"]["prompts_per_step"] = max(1, base_calls // k)
             result  = _run_variant(config, args.ablation)
             metrics = evaluate_candidate_vs_reference(config, result["policy_checkpoint"], reference_checkpoint)
+            _save_variant_artifacts(result, metrics)
             frame   = _load_metrics_frame(result["run_dir"])
             results.append({
                 "k_rollouts":        k,
@@ -165,6 +182,7 @@ def main() -> None:
             config["dpo"]["beta"] = beta
             result  = _run_variant(config, args.ablation)
             metrics = evaluate_candidate_vs_reference(config, result["policy_checkpoint"], reference_checkpoint)
+            _save_variant_artifacts(result, metrics)
             results.append({
                 "beta":                      beta,
                 "run_dir":                   result["run_dir"],
