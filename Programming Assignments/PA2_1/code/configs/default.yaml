@@ -4,16 +4,16 @@ seed: 42
 max_seq_len: 1024
 prefer_bf16: true
 use_8bit_frozen: true
-eval_every: 25
+eval_every: 50        # was 25 — too frequent, caused OOM during DPO holdout eval
 save_every: 50
 num_workers: 0
 
 models:
   policy_name: HuggingFaceTB/SmolLM2-360M
   reward_name: meta-llama/Llama-3.2-1B-Instruct
-  value_name: meta-llama/Llama-3.2-1B-Instruct
-  sft_checkpoint: null
-  rm_checkpoint: null
+  value_name:  meta-llama/Llama-3.2-1B-Instruct
+  sft_checkpoint:    null
+  rm_checkpoint:     null
   policy_checkpoint: null
 
 lora:
@@ -25,104 +25,105 @@ lora:
   dropout: 0.05
 
 data:
-  hh_dataset_name: Anthropic/hh-rlhf
-  hh_data_dir: harmless-base
-  hh_train_split: train
-  hh_eval_split: test
-  hh_train_samples: 4096
-  hh_eval_samples: 256
+  hh_dataset_name:       Anthropic/hh-rlhf
+  hh_data_dir:           harmless-base
+  hh_train_split:        train
+  hh_eval_split:         test
+  hh_train_samples:      4096
+  hh_eval_samples:       256
   hh_prompt_pool_samples: 1024
-  gsm_dataset_name: openai/gsm8k
-  gsm_config: main
-  gsm_train_samples: 2048
-  gsm_eval_samples: 256
+  gsm_dataset_name:      openai/gsm8k
+  gsm_config:            main
+  gsm_train_samples:     2048
+  gsm_eval_samples:      256
 
 generation:
-  do_sample: true
-  temperature: 0.7
-  top_p: 0.9
+  do_sample:     true
+  temperature:   0.7
+  top_p:         0.9
   max_new_tokens: 128
 
 optimizer:
   weight_decay: 0.01
-  adam_beta1: 0.9
-  adam_beta2: 0.95
-  adam_eps: 1.0e-8
+  adam_beta1:   0.9
+  adam_beta2:   0.95
+  adam_eps:     1.0e-8
 
 sft:
-  enabled: true
-  epochs: 1
+  enabled:    true
+  epochs:     1
   batch_size: 8
   grad_accum: 4
-  lr: 2.0e-4
-  warmup_ratio: 0.03
-  log_every: 1
+  lr:         1.0e-4    # was 2e-4; halved for stability
+  warmup_ratio: 0.05
+  log_every:  1
 
 rm:
-  enabled: true
-  epochs: 1
+  enabled:    true
+  epochs:     1
   batch_size: 8
   grad_accum: 1
-  lr: 1.0e-4
-  warmup_ratio: 0.03
-  use_lora: true
-  log_every: 1
+  lr:         5.0e-5    # was 1e-4; halved for stability
+  warmup_ratio: 0.05
+  use_lora:   true
+  log_every:  1
 
 dpo:
-  enabled: false
-  epochs: 1
-  batch_size: 8
-  grad_accum: 4
-  lr: 5.0e-5
-  warmup_ratio: 0.03
-  beta: 0.1
-  log_every: 1
+  enabled:    false
+  epochs:     1
+  batch_size: 4         # was 8; smaller to avoid OOM when reference is loaded
+  grad_accum: 8         # keep effective batch = 32
+  lr:         2.0e-5    # was 5e-5; lower for DPO stability
+  warmup_ratio: 0.05
+  beta:       0.1
+  log_every:  1
 
 ppo:
-  enabled: false
-  steps: 200
-  prompts_per_step: 8
-  batch_size: 8
-  update_epochs: 4
-  lr_policy: 5.0e-5
-  lr_value: 1.0e-4
-  gamma: 1.0
-  gae_lambda: 0.95
-  beta: 0.1
-  epsilon: 0.2
-  entropy_coef: 0.0
-  value_coef: 0.5
-  max_new_tokens: 128
+  enabled:           false
+  steps:             200
+  prompts_per_step:  8
+  batch_size:        8
+  update_epochs:     4
+  lr_policy:         2.0e-5   # was 5e-5
+  lr_value:          5.0e-5   # was 1e-4
+  gamma:             1.0
+  gae_lambda:        0.95
+  beta:              0.1
+  epsilon:           0.2
+  entropy_coef:      0.0
+  value_coef:        0.5
+  max_new_tokens:    128
   freeze_value_backbone: true
-  log_every: 1
+  log_every:         1
 
 grpo:
-  enabled: false
-  steps: 200
+  enabled:          false
+  steps:            200
   prompts_per_step: 8
-  k_rollouts: 4
-  batch_size: 8
-  update_epochs: 1
-  lr_policy: 5.0e-5
-  beta: 0.1
-  epsilon: 0.2
-  max_new_tokens: 128
-  log_every: 1
+  k_rollouts:       4
+  batch_size:       8
+  update_epochs:    1
+  lr_policy:        2.0e-5   # was 5e-5
+  beta:             0.1
+  epsilon:          0.2
+  max_new_tokens:   128
+  log_every:        1
 
 rlvr:
-  enabled: false
-  steps: 300
+  enabled:          false
+  steps:            300
   prompts_per_step: 8
-  k_rollouts: 4
-  batch_size: 8
-  update_epochs: 1
-  lr_policy: 5.0e-5
-  beta: 0.05
-  epsilon: 0.2
-  max_new_tokens: 256
-  log_every: 1
+  k_rollouts:       4
+  batch_size:       8
+  update_epochs:    1
+  lr_policy:        2.0e-5   # was 5e-5
+  beta:             0.05
+  epsilon:          0.2
+  max_new_tokens:   256
+  log_every:        1
 
 evaluation:
-  prompts: 200
+  prompts:          200
   sample_table_size: 5
-  max_new_tokens: 128
+  max_new_tokens:   128
+  batch_size:       4        # explicit small batch for eval generation
