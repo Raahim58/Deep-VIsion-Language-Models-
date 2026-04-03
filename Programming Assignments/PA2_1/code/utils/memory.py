@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from contextlib import nullcontext
 from typing import Iterator
 
@@ -49,3 +50,13 @@ def get_gpu_report() -> dict[str, float | str]:
         "reserved_gb": round(reserved_gb, 2),
         "allocated_gb": round(allocated_gb, 2),
     }
+
+
+
+def release_cuda_memory(*objects) -> None:
+    for obj in objects:
+        del obj
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()

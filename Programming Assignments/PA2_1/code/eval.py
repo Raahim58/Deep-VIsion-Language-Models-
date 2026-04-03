@@ -28,6 +28,7 @@ from model.logprobs import response_token_logprobs
 from utils.config import load_config
 from utils.io import ensure_dir, save_json
 from utils.metrics import gsm8k_exact_match
+from utils.memory import release_cuda_memory
 from utils.text import strip_special_tokens
 
 
@@ -48,6 +49,46 @@ def _load_run_summary(checkpoint: str) -> dict[str, Any]:
     return {}
 
 
+def _batched(items: list, batch_size: int):
+    batch_size = max(1, int(batch_size))
+    for idx in range(0, len(items), batch_size):
+        yield items[idx : idx + batch_size]
+
+
+def _eval_batch_size(config: dict[str, Any]) -> int:
+    return max(1, int(config["evaluation"].get("batch_size", config["dpo"]["batch_size"])))
+
+
+def _batched_outputs(model, tokenizer, prompts: list[str], max_new_tokens: int, batch_size: int) -> list[str]:
+    outputs: list[str] = []
+    for prompt_batch in _batched(prompts, batch_size):
+        outputs.extend(generate_completions(model, tokenizer, prompt_batch, max_new_tokens=max_new_tokens, do_sample=False))
+    return outputs
+
+
+def _batched_reward_scores(reward_fn, prompts: list[str], outputs: list[str], batch_size: int) -> torch.Tensor:
+    scores = []
+    for prompt_batch, output_batch in zip(_batched(prompts, batch_size), _batched(outputs, batch_size)):
+        scores.append(reward_fn(prompt_batch, output_batch).detach().cpu())
+    return torch.cat(scores) if scores else torch.empty(0)
+
+
+def _batched_mean_kl(model, reference, tokenizer, prompts: list[str], outputs: list[str], max_seq_len: int, batch_size: int) -> float:
+    device = next(model.parameters()).device
+    total_kl = 0.0
+    total_count = 0
+    for prompt_batch, output_batch in zip(_batched(prompts, batch_size), _batched(outputs, batch_size)):
+        rollout = build_rollout_batch(tokenizer, prompt_batch, output_batch, max_seq_len)
+        rollout = {key: value.to(device) for key, value in rollout.items()}
+        with torch.no_grad():
+            policy_logprobs, valid_mask = response_token_logprobs(model, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"])
+            reference_logprobs, _ = response_token_logprobs(reference, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"])
+            total_kl += float(mean_masked_kl(policy_logprobs, reference_logprobs, valid_mask).item()) * len(prompt_batch)
+        total_count += len(prompt_batch)
+        release_cuda_memory(rollout, policy_logprobs, reference_logprobs, valid_mask)
+    return total_kl / max(1, total_count)
+
+
 def evaluate_pairwise_preference_accuracy(config: dict[str, Any], policy_checkpoint: str) -> dict[str, float]:
     policy_tokenizer = load_policy_tokenizer(config["models"]["policy_name"])
     policy = load_policy_model(config, checkpoint=policy_checkpoint, trainable=False)
@@ -63,9 +104,12 @@ def evaluate_pairwise_preference_accuracy(config: dict[str, Any], policy_checkpo
     )
     values = []
     for batch in loader:
-        metrics = dpo_batch_metrics(policy, reference, batch, config["dpo"]["beta"])
+        with torch.no_grad():
+            metrics = dpo_batch_metrics(policy, reference, batch, config["dpo"]["beta"])
         values.append(float(metrics["preference_accuracy"].item()))
-    return {"heldout_preference_accuracy": sum(values) / max(1, len(values))}
+    result = {"heldout_preference_accuracy": sum(values) / max(1, len(values))}
+    release_cuda_memory(policy, reference, loader)
+    return result
 
 
 def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, reference_checkpoint: str) -> dict:
@@ -76,36 +120,15 @@ def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, ref
 
     policy_tokenizer, reward_tokenizer, reference, reward_model, reward_fn = _load_eval_context(config, reference_checkpoint)
     candidate = load_policy_model(config, checkpoint=candidate_checkpoint, trainable=False)
+    eval_batch_size = _eval_batch_size(config)
 
-    candidate_outputs = generate_completions(
-        candidate,
-        policy_tokenizer,
-        prompts,
-        max_new_tokens=config["evaluation"]["max_new_tokens"],
-        do_sample=False,
-    )
-    reference_outputs = generate_completions(
-        reference,
-        policy_tokenizer,
-        prompts,
-        max_new_tokens=config["evaluation"]["max_new_tokens"],
-        do_sample=False,
-    )
+    candidate_outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
+    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
 
-    candidate_rewards = reward_fn(prompts, candidate_outputs)
-    reference_rewards = reward_fn(prompts, reference_outputs)
+    candidate_rewards = _batched_reward_scores(reward_fn, prompts, candidate_outputs, eval_batch_size)
+    reference_rewards = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size)
     win_rate = float((candidate_rewards > reference_rewards).float().mean().item())
-
-    rollout = build_rollout_batch(policy_tokenizer, prompts, candidate_outputs, config["max_seq_len"])
-    device = next(candidate.parameters()).device
-    rollout = {key: value.to(device) for key, value in rollout.items()}
-    candidate_logprobs, valid_mask = response_token_logprobs(
-        candidate, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
-    )
-    reference_logprobs, _ = response_token_logprobs(
-        reference, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
-    )
-    mean_kl = float(mean_masked_kl(candidate_logprobs, reference_logprobs, valid_mask).item())
+    mean_kl = _batched_mean_kl(candidate, reference, policy_tokenizer, prompts, candidate_outputs, config["max_seq_len"], eval_batch_size)
 
     sample_rows = []
     for prompt, cand, ref, cand_score, ref_score in zip(
@@ -133,6 +156,7 @@ def evaluate_candidate_vs_reference(config: dict, candidate_checkpoint: str, ref
         "sample_rows": sample_rows,
     }
     result.update(evaluate_pairwise_preference_accuracy(config, candidate_checkpoint))
+    release_cuda_memory(candidate, reference, reward_model)
     return result
 
 
@@ -143,14 +167,9 @@ def evaluate_gsm8k_pass_at_1(config: dict, candidate_checkpoint: str) -> dict:
 
     policy_tokenizer = load_policy_tokenizer(config["models"]["policy_name"])
     candidate = load_policy_model(config, checkpoint=candidate_checkpoint, trainable=False)
-    outputs = generate_completions(
-        candidate,
-        policy_tokenizer,
-        prompts,
-        max_new_tokens=config["rlvr"]["max_new_tokens"],
-        do_sample=False,
-    )
+    outputs = _batched_outputs(candidate, policy_tokenizer, prompts, config["rlvr"]["max_new_tokens"], _eval_batch_size(config))
     pass_at_1 = sum(gsm8k_exact_match(pred, target) for pred, target in zip(outputs, gold)) / max(1, len(gold))
+    release_cuda_memory(candidate)
     return {"gsm8k_pass_at_1": float(pass_at_1)}
 
 
@@ -171,14 +190,9 @@ def evaluate_method_comparison(
     metrics_rows = []
     resource_rows = []
 
-    reference_outputs = generate_completions(
-        reference,
-        policy_tokenizer,
-        prompts,
-        max_new_tokens=config["evaluation"]["max_new_tokens"],
-        do_sample=False,
-    )
-    reference_scores = reward_fn(prompts, reference_outputs)
+    eval_batch_size = _eval_batch_size(config)
+    reference_outputs = _batched_outputs(reference, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
+    reference_scores = _batched_reward_scores(reward_fn, prompts, reference_outputs, eval_batch_size)
     outputs_by_method['sft'] = reference_outputs
     scores_by_method['sft'] = reference_scores.tolist()
     resource_rows.append(
@@ -192,25 +206,13 @@ def evaluate_method_comparison(
             },
         }
     )
-    reference_rollout = build_rollout_batch(policy_tokenizer, prompts, reference_outputs, config["max_seq_len"])
-    reference_device = next(reference.parameters()).device
-    reference_rollout = {key: value.to(reference_device) for key, value in reference_rollout.items()}
 
     for name, checkpoint in method_checkpoints.items():
         model = load_policy_model(config, checkpoint=checkpoint, trainable=False)
-        outputs = generate_completions(
-            model,
-            policy_tokenizer,
-            prompts,
-            max_new_tokens=config["evaluation"]["max_new_tokens"],
-            do_sample=False,
-        )
-        scores = reward_fn(prompts, outputs)
-        rollout = build_rollout_batch(policy_tokenizer, prompts, outputs, config["max_seq_len"])
-        device = next(model.parameters()).device
-        rollout = {key: value.to(device) for key, value in rollout.items()}
-        policy_logprobs, valid_mask = response_token_logprobs(model, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"])
-        ref_logprobs, _ = response_token_logprobs(reference, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"])
+        eval_batch_size = _eval_batch_size(config)
+        outputs = _batched_outputs(model, policy_tokenizer, prompts, config["evaluation"]["max_new_tokens"], eval_batch_size)
+        scores = _batched_reward_scores(reward_fn, prompts, outputs, eval_batch_size)
+        mean_kl = _batched_mean_kl(model, reference, policy_tokenizer, prompts, outputs, config["max_seq_len"], eval_batch_size)
         outputs_by_method[name] = outputs
         scores_by_method[name] = scores.tolist()
         row = {
@@ -218,7 +220,7 @@ def evaluate_method_comparison(
             "checkpoint": checkpoint,
             "rm_win_rate_vs_sft": float((scores > reference_scores).float().mean().item()),
             "mean_rm_score": float(scores.mean().item()),
-            "mean_kl_from_sft": float(mean_masked_kl(policy_logprobs, ref_logprobs, valid_mask).item()),
+            "mean_kl_from_sft": mean_kl,
         }
         row.update(evaluate_pairwise_preference_accuracy(config, checkpoint))
         if include_gsm8k and name.lower() == 'rlvr':
@@ -235,6 +237,7 @@ def evaluate_method_comparison(
                 "total_training_time_sec": summary.get("total_training_time_sec"),
             }
         )
+        release_cuda_memory(model)
 
     sample_rows = []
     sample_count = config["evaluation"]["sample_table_size"]
@@ -245,11 +248,13 @@ def evaluate_method_comparison(
             row[f"{name}_rm_score"] = scores_by_method[name][idx]
         sample_rows.append(row)
 
-    return {
+    result = {
         "metrics": metrics_rows,
         "sample_rows": sample_rows,
         "resource_rows": resource_rows,
     }
+    release_cuda_memory(reference, reward_model)
+    return result
 
 
 def parse_args() -> argparse.Namespace:

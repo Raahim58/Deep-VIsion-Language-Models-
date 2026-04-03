@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 import torch
 from torch.cuda.amp import GradScaler
@@ -16,7 +17,7 @@ from model.reward_model import pairwise_reward_loss, score_sequences
 from utils.config import load_config
 from utils.io import make_run_dir, save_json
 from utils.logging_utils import JsonlMetricLogger, emit_step_log, get_logger
-from utils.memory import amp_context, get_torch_dtype
+from utils.memory import amp_context, get_torch_dtype, release_cuda_memory
 from utils.seed import seed_everything
 
 
@@ -33,6 +34,9 @@ def _grad_norm(parameters) -> float:
 def train_reward_model(config: dict) -> dict:
     seed_everything(config["seed"])
     logger = get_logger("train_rm")
+    run_start_time = time.perf_counter()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     run_dir = make_run_dir(config["output_dir"], "rm")
     metric_logger = JsonlMetricLogger(run_dir / "metrics.jsonl")
 
@@ -126,9 +130,12 @@ def train_reward_model(config: dict) -> dict:
 
     model.save_pretrained(run_dir)
     tokenizer.save_pretrained(run_dir)
-    save_json(run_dir / "summary.json", {"run_dir": str(run_dir), "stage": "rm", "rm_checkpoint": str(run_dir)})
+    total_training_time_sec = time.perf_counter() - run_start_time
+    save_json(run_dir / "summary.json", {"run_dir": str(run_dir), "stage": "rm", "rm_checkpoint": str(run_dir), "total_training_time_sec": total_training_time_sec, "mean_step_time_sec": total_training_time_sec / max(1, global_step), "peak_vram_gb": (torch.cuda.max_memory_allocated() / 1024**3) if torch.cuda.is_available() else 0.0})
     logger.info("Saved RM adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "rm_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "rm_checkpoint": str(run_dir)}
+    release_cuda_memory(model, optimizer, scheduler, scaler, loader, train_dataset, collator)
+    return result
 
 
 def parse_args() -> argparse.Namespace:

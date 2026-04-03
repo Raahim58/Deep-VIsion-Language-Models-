@@ -17,7 +17,7 @@ from model.loading import load_policy_model, load_policy_tokenizer
 from utils.config import load_config
 from utils.io import make_run_dir, save_json
 from utils.logging_utils import JsonlMetricLogger, emit_step_log, get_logger
-from utils.memory import amp_context, get_torch_dtype
+from utils.memory import amp_context, get_torch_dtype, release_cuda_memory
 from utils.seed import seed_everything
 
 
@@ -128,7 +128,9 @@ def train_sft(config: dict) -> dict:
         },
     )
     logger.info("Saved SFT adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    release_cuda_memory(model, optimizer, scheduler, scaler, loader, train_dataset, collator)
+    return result
 
 
 def parse_args() -> argparse.Namespace:

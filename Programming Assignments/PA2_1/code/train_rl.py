@@ -31,6 +31,7 @@ from utils.config import load_config
 from utils.io import make_run_dir, save_json
 from utils.logging_utils import JsonlMetricLogger, emit_step_log, get_logger
 from utils.metrics import gsm8k_exact_match
+from utils.memory import release_cuda_memory
 from utils.seed import seed_everything
 
 
@@ -82,35 +83,57 @@ def _peak_vram_gb() -> float:
     return float(torch.cuda.max_memory_allocated() / 1024**3) if torch.cuda.is_available() else 0.0
 
 
+def _batched(items: list, batch_size: int):
+    batch_size = max(1, int(batch_size))
+    for idx in range(0, len(items), batch_size):
+        yield items[idx : idx + batch_size]
+
+
 def _evaluate_dpo_holdout(policy, reference, reward_fn, tokenizer, heldout_prompts: list[str], heldout_loader, config: dict) -> dict[str, float]:
-    outputs = generate_completions(
-        policy,
-        tokenizer,
-        heldout_prompts,
-        max_new_tokens=config["evaluation"]["max_new_tokens"],
-        do_sample=False,
-    )
-    scores = reward_fn(heldout_prompts, outputs)
-    rollout = build_rollout_batch(tokenizer, heldout_prompts, outputs, config["max_seq_len"])
-    device = next(policy.parameters()).device
-    rollout = {key: value.to(device) for key, value in rollout.items()}
-    policy_logprobs, valid_mask = response_token_logprobs(
-        policy, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
-    )
-    ref_logprobs, _ = response_token_logprobs(
-        reference, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
-    )
+    eval_batch_size = max(1, int(config["evaluation"].get("batch_size", config["dpo"]["batch_size"])))
+    rm_scores: list[float] = []
+    kl_total = 0.0
+    prompt_count = 0
     pref_acc_values = []
-    for batch in heldout_loader:
-        metrics = dpo_batch_metrics(policy, reference, batch, config["dpo"]["beta"])
-        pref_acc_values.append(float(metrics["preference_accuracy"].item()))
+    was_training = policy.training
+    policy.eval()
+    reference.eval()
+    try:
+        for prompt_batch in _batched(heldout_prompts, eval_batch_size):
+            outputs = generate_completions(
+                policy,
+                tokenizer,
+                prompt_batch,
+                max_new_tokens=config["evaluation"]["max_new_tokens"],
+                do_sample=False,
+            )
+            scores = reward_fn(prompt_batch, outputs)
+            rm_scores.extend(scores.tolist())
+            rollout = build_rollout_batch(tokenizer, prompt_batch, outputs, config["max_seq_len"])
+            device = next(policy.parameters()).device
+            rollout = {key: value.to(device) for key, value in rollout.items()}
+            with torch.no_grad():
+                policy_logprobs, valid_mask = response_token_logprobs(
+                    policy, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
+                )
+                ref_logprobs, _ = response_token_logprobs(
+                    reference, rollout["input_ids"], rollout["attention_mask"], rollout["response_mask"]
+                )
+                kl_total += float(mean_masked_kl(policy_logprobs, ref_logprobs, valid_mask).item()) * len(prompt_batch)
+            prompt_count += len(prompt_batch)
+            release_cuda_memory(rollout, policy_logprobs, ref_logprobs, valid_mask)
+        for batch in heldout_loader:
+            with torch.no_grad():
+                metrics = dpo_batch_metrics(policy, reference, batch, config["dpo"]["beta"])
+            pref_acc_values.append(float(metrics["preference_accuracy"].item()))
+    finally:
+        if was_training:
+            policy.train()
     return {
-        "heldout_rm_score": float(scores.mean().item()),
-        "heldout_mean_kl": float(mean_masked_kl(policy_logprobs, ref_logprobs, valid_mask).item()),
+        "heldout_rm_score": (sum(rm_scores) / max(1, len(rm_scores))),
+        "heldout_mean_kl": kl_total / max(1, prompt_count),
         "heldout_preference_accuracy": sum(pref_acc_values) / max(1, len(pref_acc_values)),
     }
-
-
 
 
 def run_dpo(config: dict) -> dict:
@@ -154,6 +177,8 @@ def run_dpo(config: dict) -> dict:
     ]
     heldout_loader = None
     reward_fn = None
+    reward_tokenizer = None
+    reward_model = None
     if rm_checkpoint:
         reward_tokenizer = load_reward_tokenizer(config["models"]["reward_name"])
         reward_model = load_reward_model(config, checkpoint=rm_checkpoint, trainable=False)
@@ -274,7 +299,9 @@ def run_dpo(config: dict) -> dict:
         },
     )
     logger.info("Saved DPO adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    release_cuda_memory(policy, reference, reward_model, optimizer, loader, heldout_loader)
+    return result
 
 
 def run_ppo(config: dict) -> dict:
@@ -353,13 +380,16 @@ def run_ppo(config: dict) -> dict:
             checkpoint_dir = run_dir / f"checkpoint_step_{step}"
             policy.save_pretrained(checkpoint_dir)
             policy_tokenizer.save_pretrained(checkpoint_dir)
+        release_cuda_memory(rollout)
 
     policy.save_pretrained(run_dir)
     policy_tokenizer.save_pretrained(run_dir)
     total_training_time_sec = time.perf_counter() - run_start_time
     save_json(run_dir / "summary.json", {"run_dir": str(run_dir), "stage": "ppo", "policy_checkpoint": str(run_dir), "total_training_time_sec": total_training_time_sec, "mean_step_time_sec": total_training_time_sec / max(1, config["ppo"]["steps"]), "peak_vram_gb": _peak_vram_gb()})
     logger.info("Saved PPO adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    release_cuda_memory(policy, reference, reward_model, value_model, policy_optimizer, value_optimizer, prompts_dataset)
+    return result
 
 
 def run_grpo(config: dict) -> dict:
@@ -426,13 +456,16 @@ def run_grpo(config: dict) -> dict:
             checkpoint_dir = run_dir / f"checkpoint_step_{step}"
             policy.save_pretrained(checkpoint_dir)
             policy_tokenizer.save_pretrained(checkpoint_dir)
+        release_cuda_memory(rollout)
 
     policy.save_pretrained(run_dir)
     policy_tokenizer.save_pretrained(run_dir)
     total_training_time_sec = time.perf_counter() - run_start_time
     save_json(run_dir / "summary.json", {"run_dir": str(run_dir), "stage": "grpo", "policy_checkpoint": str(run_dir), "total_training_time_sec": total_training_time_sec, "mean_step_time_sec": total_training_time_sec / max(1, config["grpo"]["steps"]), "peak_vram_gb": _peak_vram_gb()})
     logger.info("Saved GRPO adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    release_cuda_memory(policy, reference, reward_model, optimizer, prompts_dataset)
+    return result
 
 
 def run_rlvr(config: dict) -> dict:
@@ -514,13 +547,16 @@ def run_rlvr(config: dict) -> dict:
             checkpoint_dir = run_dir / f"checkpoint_step_{step}"
             policy.save_pretrained(checkpoint_dir)
             policy_tokenizer.save_pretrained(checkpoint_dir)
+        release_cuda_memory(rollout)
 
     policy.save_pretrained(run_dir)
     policy_tokenizer.save_pretrained(run_dir)
     total_training_time_sec = time.perf_counter() - run_start_time
     save_json(run_dir / "summary.json", {"run_dir": str(run_dir), "stage": "rlvr", "policy_checkpoint": str(run_dir), "total_training_time_sec": total_training_time_sec, "mean_step_time_sec": total_training_time_sec / max(1, config["rlvr"]["steps"]), "peak_vram_gb": _peak_vram_gb()})
     logger.info("Saved RLVR adapter to %s", run_dir)
-    return {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    result = {"run_dir": str(run_dir), "policy_checkpoint": str(run_dir)}
+    release_cuda_memory(policy, reference, optimizer, gsm_train, gsm_eval)
+    return result
 
 
 def parse_args() -> argparse.Namespace:
