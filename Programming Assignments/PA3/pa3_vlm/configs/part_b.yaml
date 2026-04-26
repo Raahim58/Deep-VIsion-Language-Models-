@@ -1,0 +1,31 @@
+seed: 42
+output_dir: outputs
+model:
+  lm_name: HuggingFaceTB/SmolLM2-360M-Instruct
+  d_lm: 960
+  v_txt: 49152
+data:
+  n_per_class: 1000
+  alpaca_n: 1000
+vqvae:
+  k: 256
+  d: 64
+  beta: 0.25
+  batch_size: 64
+  epochs: 80
+  lr: 0.0003
+  ema_decay: 0.99
+  dead_threshold: 2
+train:
+  batch_lm: 16
+  grad_accum: 4
+  epochs: 3
+  lambda_replay: 0.2
+  gamma_img: 0.5
+  lr_lora: 0.0005
+  lr_overlay: 0.00005
+  eval_every: 300
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+

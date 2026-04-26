@@ -1,0 +1,13 @@
+torch
+torchvision
+transformers
+peft
+accelerate
+datasets
+numpy
+matplotlib
+scikit-learn
+pandas
+tqdm
+PyYAML
+

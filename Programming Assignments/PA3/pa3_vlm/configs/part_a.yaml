@@ -1,0 +1,24 @@
+seed: 42
+output_dir: outputs
+model:
+  lm_name: HuggingFaceTB/SmolLM2-360M-Instruct
+  clip_name: openai/clip-vit-base-patch32
+  d_lm: 960
+  v_txt: 49152
+data:
+  train_per_class: 1000
+  test_per_class: 200
+  alpaca_n: 1000
+train:
+  batch_a1: 32
+  batch_a2: 8
+  grad_accum: 4
+  lr_a1: 0.0003
+  lr_a2: 0.0005
+  lr_a3: 0.0002
+  lambda_replay: 0.2
+  eval_every: 300
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+
